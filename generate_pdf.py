@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import Error, sync_playwright
 
 DEFAULT_HTML = "gpt.html"
 DEFAULT_PDF = "gpt.pdf"
@@ -85,7 +85,16 @@ def run_wkhtmltopdf(temp_html_path: Path, output_path: Path) -> None:
 
 def run_chromium(temp_html_path: Path, output_path: Path) -> None:
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch()
+        try:
+            browser = playwright.chromium.launch()
+        except Error as exc:
+            raise RuntimeError(
+                "Chromium failed to launch. Install the runtime dependencies with "
+                "`python -m playwright install-deps chromium` (Debian/Ubuntu) and "
+                "ensure `python -m playwright install chromium` has been run. "
+                "Alternatively, re-run with `--engine wkhtmltopdf`."
+            ) from exc
+
         context = browser.new_context()
         page = context.new_page()
         page.goto(temp_html_path.as_uri(), wait_until="networkidle")
