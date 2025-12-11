@@ -5,8 +5,11 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from playwright.sync_api import Error, sync_playwright
+
 DEFAULT_HTML = "gpt.html"
 DEFAULT_PDF = "gpt.pdf"
+DEFAULT_ENGINE = "chromium"
 CDN_PATTERN = re.compile(r"https://cdn\.oaistatic\.com[^'\"\s>]+", re.IGNORECASE)
 FONT_FACE_PATTERN = re.compile(
     r"@font-face\s*\{[^}]*cdn\.oaistatic\.com[^}]*\}", re.IGNORECASE | re.DOTALL
@@ -39,13 +42,9 @@ def scrub_directory(temp_dir: Path) -> None:
         css_file.write_text(css_text, encoding="utf-8")
 
 
-def generate_pdf(html_path: Path, output_path: Path) -> None:
+def generate_pdf(html_path: Path, output_path: Path, engine: str) -> None:
     if not html_path.exists():
         raise FileNotFoundError(f"HTML file not found: {html_path}")
-
-    wkhtmltopdf = shutil.which("wkhtmltopdf")
-    if not wkhtmltopdf:
-        raise RuntimeError("wkhtmltopdf is not installed or not found on PATH.")
 
     html_text = html_path.read_text(encoding="utf-8", errors="ignore")
     cleaned_html = strip_cdn_assets(html_text)
@@ -64,18 +63,53 @@ def generate_pdf(html_path: Path, output_path: Path) -> None:
             shutil.copytree(assets_src, assets_dest)
             scrub_directory(temp_dir)
 
-        cmd = [
-            wkhtmltopdf,
-            "--enable-local-file-access",
-            str(temp_html_path),
-            str(output_path),
-        ]
-        subprocess.run(cmd, check=True)
+        if engine == "wkhtmltopdf":
+            run_wkhtmltopdf(temp_html_path, output_path)
+        else:
+            run_chromium(temp_html_path, output_path)
+
+
+def run_wkhtmltopdf(temp_html_path: Path, output_path: Path) -> None:
+    wkhtmltopdf = shutil.which("wkhtmltopdf")
+    if not wkhtmltopdf:
+        raise RuntimeError("wkhtmltopdf is not installed or not found on PATH.")
+
+    cmd = [
+        wkhtmltopdf,
+        "--enable-local-file-access",
+        str(temp_html_path),
+        str(output_path),
+    ]
+    subprocess.run(cmd, check=True)
+
+
+def run_chromium(temp_html_path: Path, output_path: Path) -> None:
+    with sync_playwright() as playwright:
+        try:
+            browser = playwright.chromium.launch()
+        except Error as exc:
+            raise RuntimeError(
+                "Chromium failed to launch. Install the runtime dependencies with "
+                "`python -m playwright install-deps chromium` (Debian/Ubuntu) and "
+                "ensure `python -m playwright install chromium` has been run. "
+                "Alternatively, re-run with `--engine wkhtmltopdf`."
+            ) from exc
+
+        context = browser.new_context()
+        page = context.new_page()
+        page.goto(temp_html_path.as_uri(), wait_until="networkidle")
+        page.pdf(
+            path=str(output_path),
+            format="A4",
+            print_background=True,
+            prefer_css_page_size=True,
+        )
+        browser.close()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Generate a PDF from a saved HTML file using wkhtmltopdf."
+        description="Generate a PDF from a saved HTML file using Chromium or wkhtmltopdf."
     )
     parser.add_argument(
         "html",
@@ -91,6 +125,12 @@ if __name__ == "__main__":
         type=Path,
         help="Path to the output PDF (default: gpt.pdf)",
     )
+    parser.add_argument(
+        "--engine",
+        choices=("chromium", "wkhtmltopdf"),
+        default=DEFAULT_ENGINE,
+        help="Rendering engine to use (default: chromium)",
+    )
 
     args = parser.parse_args()
-    generate_pdf(args.html, args.pdf)
+    generate_pdf(args.html, args.pdf, args.engine)
